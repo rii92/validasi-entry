@@ -5,37 +5,59 @@ import requests
 # ===================== KONFIGURASI =====================
 API_URL = "https://script.google.com/macros/s/AKfycbw27UeUwh0bYJLMm2-m8XtpwHlWjkcilLvVameK6H2pHivl8eMslPQuN5QUW2NcHmIu/exec?action=read"
 
+# Data fallback jika API gagal
+FALLBACK_DATA = {
+    "records": [
+        {"NAMA": "Beras", "SATUAN": "Kg", "MIN_25_rev": "13000", "MAX_25_rev": "14500"},
+        {"NAMA": "Minyak Goreng", "SATUAN": "Liter", "MIN_25_rev": "14000", "MAX_25_rev": "16000"},
+        {"NAMA": "Telur Ayam", "SATUAN": "Kg", "MIN_25_rev": "27000", "MAX_25_rev": "29000"}
+    ]
+}
+
 # ===================== AMBIL DATA DARI API =====================
-@st.cache_data(ttl=600)  # cache 10 menit agar tidak memanggil API terus
+@st.cache_data(ttl=3600, show_spinner=False)  # cache 1 jam, tanpa spinner
 def load_data():
+    # Coba load dari session state dulu (paling cepat)
+    if "cached_data" in st.session_state:
+        return st.session_state.cached_data
+    
     try:
-        r = requests.get(API_URL, timeout=20)
+        # Gunakan timeout lebih pendek untuk API
+        r = requests.get(API_URL, timeout=10)
         r.raise_for_status()
         payload = r.json()
         if "records" not in payload:
-            st.error("Response API tidak memiliki key 'records'.")
-            return pd.DataFrame()
+            raise ValueError("Response API tidak memiliki key 'records'")
         df = pd.DataFrame(payload["records"])
+        # Simpan di session state
+        st.session_state.cached_data = df
+        return df
     except Exception as e:
-        st.error(f"Gagal mengambil data dari API: {e}")
-        return pd.DataFrame()
-    return df
+        st.warning("Menggunakan data fallback karena API tidak tersedia.")
+        return pd.DataFrame(FALLBACK_DATA["records"])
 
 df = load_data()
 
 # ===================== BERSIHKAN DATA =====================
-if df.empty:
-    st.stop()
+@st.cache_data(show_spinner=False)
+def clean_data(df):
+    if df.empty:
+        return df
+    
+    # Bersihkan data dalam satu operasi
+    cleaned_df = (df
+        .query('MIN_25_rev != "#NULL!" and MAX_25_rev != "#NULL!"')
+        .assign(
+            MIN_25_rev=lambda x: pd.to_numeric(x["MIN_25_rev"], errors="coerce"),
+            MAX_25_rev=lambda x: pd.to_numeric(x["MAX_25_rev"], errors="coerce")
+        )
+        .dropna(subset=["NAMA", "SATUAN", "MIN_25_rev", "MAX_25_rev"])
+    )
+    
+    return cleaned_df
 
-# Buang baris yang MIN/MAX = "#NULL!"
-df = df[(df["MIN_25_rev"] != "#NULL!") & (df["MAX_25_rev"] != "#NULL!")]
-
-# Konversi ke numerik
-df["MIN_25_rev"] = pd.to_numeric(df["MIN_25_rev"], errors="coerce")
-df["MAX_25_rev"] = pd.to_numeric(df["MAX_25_rev"], errors="coerce")
-
-# Buang baris penting yang NaN
-df = df.dropna(subset=["NAMA", "SATUAN", "MIN_25_rev", "MAX_25_rev"])
+# Bersihkan data
+df = clean_data(df)
 
 if df.empty:
     st.error("Tidak ada data komoditas yang valid untuk ditampilkan.")
